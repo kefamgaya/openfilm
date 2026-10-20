@@ -1,11 +1,12 @@
 // @ts-check
 /**
- * Google's Gemini API with the person's own key: pictures, video (Veo), voice-over and subtitle translation. REST API
- * (https://ai.google.dev/api), key in `x-goog-api-key`. Pictures, speech and text come from `generateContent`; a video
- * is a long-running operation, asked after until it is done. Its speech has no word timings and comes as raw PCM,
- * wrapped here in a WAV file.
+ * Google's Gemini API with the person's own key: pictures, video (Veo), voice-over, transcription and subtitle
+ * translation. REST API (https://ai.google.dev/api), key in `x-goog-api-key`. Pictures, speech and text come from
+ * `generateContent`; transcription uses Gemini Transcribe through the Interactions API; a video is a long-running
+ * operation, asked after until it is done. Generated speech has no word timings and comes as raw PCM, wrapped here in
+ * a WAV file.
  */
-import { RATIO_SIZE, billedBy, call, clamp, download, extOf, imageSize, landing, list, madePicture, mimeOf, modelOf, needed, notes, number, ownAddress, serviceUrl, sleep, text, translatedLines, translationAsk, wav, wavSeconds } from './common.mjs';
+import { RATIO_SIZE, billedBy, call, clamp, download, extOf, imageSize, landing, list, madePicture, mimeOf, modelOf, needed, notes, number, ownAddress, serviceUrl, sleep, speechUpload, text, translatedLines, translationAsk, wav, wavSeconds } from './common.mjs';
 
 /** @typedef {import('./contract.mjs').Provider} Provider @typedef {import('./contract.mjs').RunContext} RunContext */
 
@@ -13,6 +14,7 @@ const NAME = 'Google Gemini';
 /** the models it makes each kind of media with, the default first (https://ai.google.dev/gemini-api/docs/models) */
 const MODELS = {
   tts: [{ id: 'gemini-3.8-flash-tts', name: 'Gemini 3.8 Flash TTS' }, { id: 'gemini-3.8-flash-lite-tts', name: 'Gemini 3.8 Flash-Lite TTS' }],
+  asr: [{ id: 'gemini-3.5-transcribe', name: 'Gemini 3.5 Transcribe' }],
   image: [
     { id: 'gemini-3.1-flash-image', name: 'Gemini 3.1 Flash Image' },
     { id: 'gemini-3-pro-image', name: 'Nano Banana Pro' },
@@ -52,7 +54,7 @@ export default {
   keysUrl: 'https://aistudio.google.com/apikey',
   /* AI Studio's keys page is where a key's project shows its billing */
   billingUrl: 'https://aistudio.google.com/apikey',
-  verbs: ['voice', 'tts', 'image', 'video', 'translate'],
+  verbs: ['voice', 'tts', 'image', 'video', 'asr', 'translate'],
   models: MODELS,
   async run(verb, args, ctx) {
     const base = serviceUrl('GOOGLE', 'https://generativelanguage.googleapis.com');
@@ -94,6 +96,34 @@ export default {
         cost: billedBy(NAME),
       };
     }
+    if (verb === 'asr') {
+      const src = needed(args, 'src');
+      const upload = await speechUpload(src, ctx);
+      const model = modelOf(MODELS, 'asr', ctx);
+      const file = await uploadFile(upload, base, send);
+      try {
+        const body = await (await send(`${base}/v1beta/interactions`, {
+          method: 'POST',
+          body: JSON.stringify({
+            model,
+            input: [{ type: 'audio', uri: file.uri, mime_type: file.mimeType }],
+            generation_config: { transcription_config: { mode: { type: 'verbatim', timestamp_granularities: ['word'] } } },
+          }),
+        })).json();
+        const words = interactionWords(body);
+        const said = interactionText(body);
+        if (said && !words.length) throw new Error(`${NAME} answered without word timestamps.`);
+        return {
+          files: [],
+          index: [{ src, text: said, words, transcribed: true }],
+          receipt: { provider: 'google', model, src, text: said, words: words.length },
+          cost: billedBy(NAME),
+        };
+      } finally {
+        /* Files otherwise remain in the person's Gemini project for up to 48 hours. Cleanup must not hide the ASR result. */
+        if (/^files\/[a-z0-9-]+$/i.test(file.name)) await send(`${base}/v1beta/${file.name}`, { method: 'DELETE' }).catch(() => {});
+      }
+    }
     if (verb === 'image') {
       const prompt = needed(args, 'prompt');
       const ratio = text(args.ratio) || '3:2';
@@ -127,6 +157,72 @@ export default {
     throw new Error(`${NAME} does not do ${verb}.`);
   },
 };
+
+/**
+ * A prepared speech file uploaded with Gemini's resumable Files API. The returned upload address is accepted only on
+ * Google's configured origin, so the person's key and bytes cannot be redirected elsewhere.
+ * @param {{ blob: Blob, name: string, size: number }} upload @param {string} base
+ * @param {(url: string, init?: RequestInit) => Promise<Response>} send
+ */
+async function uploadFile(upload, base, send) {
+  const mimeType = upload.blob.type || mimeOf(upload.name);
+  const started = await send(`${base}/upload/v1beta/files`, {
+    method: 'POST',
+    headers: {
+      'x-goog-upload-protocol': 'resumable',
+      'x-goog-upload-command': 'start',
+      'x-goog-upload-header-content-length': String(upload.size),
+      'x-goog-upload-header-content-type': mimeType,
+    },
+    body: JSON.stringify({ file: { display_name: upload.name } }),
+  });
+  const uploadUrl = ownAddress(NAME, started.headers.get('x-goog-upload-url'), base);
+  const body = await (await send(uploadUrl, {
+    method: 'POST',
+    headers: {
+      'content-type': mimeType,
+      'content-length': String(upload.size),
+      'x-goog-upload-offset': '0',
+      'x-goog-upload-command': 'upload, finalize',
+    },
+    body: upload.blob,
+  })).json();
+  const file = body?.file;
+  const uri = text(file?.uri), name = text(file?.name);
+  if (!uri || !name) throw new Error(`${NAME} did not keep the speech upload.`);
+  return { uri, name, mimeType: text(file?.mimeType ?? file?.mime_type) || mimeType };
+}
+
+/** Seconds from a protobuf duration such as `0.450s`. @param {unknown} value */
+function offsetSeconds(value) {
+  const raw = typeof value === 'string' ? value.trim().replace(/s$/, '') : value;
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+}
+
+/** The text output parts of a completed interaction. @param {any} body */
+function interactionContents(body) {
+  return (Array.isArray(body?.steps) ? body.steps : [])
+    .filter((/** @type {any} */ step) => !step?.type || step.type === 'model_output')
+    .flatMap((/** @type {any} */ step) => Array.isArray(step?.content) ? step.content : []);
+}
+
+/** @param {any} body */
+function interactionText(body) {
+  const direct = text(body?.output_text ?? body?.outputText);
+  return direct || interactionContents(body).map((/** @type {any} */ part) => text(part?.text)).filter(Boolean).join(' ').trim();
+}
+
+/** Gemini word annotations as OpenFilm's provider word contract. @param {any} body */
+function interactionWords(body) {
+  return interactionContents(body).flatMap((/** @type {any} */ part) => Array.isArray(part?.annotations) ? part.annotations : [])
+    .filter((/** @type {any} */ a) => a?.type === 'word_info' && text(a?.text))
+    .map((/** @type {any} */ a) => {
+      const start = offsetSeconds(a.start_offset ?? a.startOffset);
+      const end = offsetSeconds(a.end_offset ?? a.endOffset);
+      return start === null ? null : { token: text(a.text), start, end: end === null || end < start ? start : end };
+    }).filter(Boolean);
+}
 
 /** The first inline file of a `generateContent` answer, or a sentence saying why there is none. */
 function inline(/** @type {any} */ body, /** @type {string} */ what) {

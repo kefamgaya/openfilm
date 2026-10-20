@@ -28,6 +28,7 @@ test('the person\'s choice serves while it can; a key gone serves nothing', asyn
   const keys = { elevenlabs: 'xi-0123456789', google: 'AIza-0123456789' };
   assert.equal(await id(chooseProvider('tts', { settings: settings(keys, { tts: 'google' }) })), 'google');
   assert.equal(await id(chooseProvider('voice', { settings: settings(keys, { tts: 'google' }) })), 'google');
+  assert.equal(await id(chooseProvider('asr', { settings: settings(keys, { asr: 'google' }) })), 'google');
   assert.equal(await id(chooseProvider('tts', { settings: settings({}, { tts: 'google' }) })), null);
 });
 

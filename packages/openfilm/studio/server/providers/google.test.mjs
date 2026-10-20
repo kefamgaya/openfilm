@@ -15,9 +15,9 @@ before(async () => {
     for await (const c of req) chunks.push(c);
     const call = { method: req.method, url: new URL(req.url, 'http://x'), headers: req.headers, body: Buffer.concat(chunks) };
     seen.push(call);
-    const [status, body] = await reply(call);
-    if (Buffer.isBuffer(body)) res.writeHead(status, { 'content-type': 'video/mp4' }).end(body);
-    else res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
+    const [status, body, headers = {}] = await reply(call);
+    if (Buffer.isBuffer(body)) res.writeHead(status, { 'content-type': 'video/mp4', ...headers }).end(body);
+    else res.writeHead(status, { 'content-type': 'application/json', ...headers }).end(JSON.stringify(body));
   });
   await new Promise((done) => server.listen(0, '127.0.0.1', done));
   base = `http://127.0.0.1:${server.address().port}`;
@@ -39,6 +39,39 @@ test('voice-over: the raw PCM wrapped as a WAV, its length from the samples', as
   assert.equal(result.files[0].path, 'assets/audio/vo/line.wav');
   assert.equal(Buffer.from(result.files[0].bytes).toString('ascii', 0, 4), 'RIFF');
   assert.equal(result.index[0].dur, 1);
+});
+
+test('transcription: speech is uploaded, word timestamps returned, and the temporary file deleted', async () => {
+  reply = (call) => {
+    if (call.url.pathname === '/upload/v1beta/files') {
+      return [200, {}, { 'x-goog-upload-url': `${base}/upload/session-1` }];
+    }
+    if (call.url.pathname === '/upload/session-1') {
+      assert.equal(call.headers['x-goog-upload-command'], 'upload, finalize');
+      assert.equal(call.headers['content-type'], 'audio/mpeg');
+      return [200, { file: { name: 'files/audio-1', uri: `${base}/v1beta/files/audio-1`, mimeType: 'audio/mpeg' } }];
+    }
+    if (call.url.pathname === '/v1beta/interactions') {
+      return [200, { status: 'completed', steps: [{ type: 'model_output', content: [{
+        type: 'text', text: 'Hello world.', annotations: [
+          { type: 'word_info', text: 'Hello', start_offset: '0.100s', end_offset: '0.450s' },
+          { type: 'word_info', text: 'world.', start_offset: '0.500s', end_offset: '0.850s' },
+        ],
+      }] }] }];
+    }
+    if (call.method === 'DELETE' && call.url.pathname === '/v1beta/files/audio-1') return [200, {}];
+    return [404, {}];
+  };
+  const mp3 = new Uint8Array(Buffer.from('ID3 speech bytes'));
+  const result = await google.run('asr', { src: 'assets/interview.mp3' }, ctx({ 'assets/interview.mp3': mp3 }));
+  const interaction = seen.findLast((call) => call.url.pathname === '/v1beta/interactions');
+  const sent = JSON.parse(interaction.body);
+  assert.equal(sent.model, 'gemini-3.5-transcribe');
+  assert.deepEqual(sent.generation_config.transcription_config.mode, { type: 'verbatim', timestamp_granularities: ['word'] });
+  assert.deepEqual(result.index, [{ src: 'assets/interview.mp3', text: 'Hello world.', words: [
+    { token: 'Hello', start: 0.1, end: 0.45 }, { token: 'world.', start: 0.5, end: 0.85 },
+  ], transcribed: true }]);
+  assert.ok(seen.some((call) => call.method === 'DELETE' && call.url.pathname === '/v1beta/files/audio-1'));
 });
 
 test('a picture: the ratio and size asked, the extension from what came back, transparency noted', async () => {
