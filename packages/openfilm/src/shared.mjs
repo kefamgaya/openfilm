@@ -135,9 +135,11 @@ export function kill(proc) {
 }
 
 /** Run ffmpeg; `timeoutMs`: stop it and fail with `what` when it has not finished by then. */
-export function ffmpeg(args, { input = false, timeoutMs = 0, what = 'ffmpeg' } = {}) {
+export function ffmpeg(args, { input = false, timeoutMs = 0, what = 'ffmpeg', cwd } = {}) {
   /* -nostdin: ffmpeg never reads keys from a terminal it was started in (an agent's shell is one) */
-  const proc = spawn('ffmpeg', ['-hide_banner', '-nostdin', '-loglevel', 'error', '-y', ...args], { stdio: [input ? 'pipe' : 'ignore', 'inherit', 'pipe'], windowsHide: true });
+  const proc = spawn('ffmpeg', ['-hide_banner', '-nostdin', '-loglevel', 'error', '-y', ...args], {
+    stdio: [input ? 'pipe' : 'ignore', 'inherit', 'pipe'], windowsHide: true, ...(cwd ? { cwd } : {}),
+  });
   let err = '';
   proc.stderr.on('data', (d) => { err += d; });
   let late = false;

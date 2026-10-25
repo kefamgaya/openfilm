@@ -19,7 +19,7 @@ import {
   AlignCenterHorizontal, AlignCenterVertical, AlignEndHorizontal, AlignEndVertical, AlignHorizontalDistributeCenter,
   AlignStartHorizontal, AlignStartVertical, AlignVerticalDistributeCenter, ArrowRightToLine, AudioLines, Captions,
   Check, ChevronRight, CircleAlert, Clapperboard, Copy, Diamond, Film, Gauge, Image as ImageIcon, Link2, Maximize2, MousePointerClick,
-  Lock, MoveHorizontal, Music, Replace, RotateCcw, Scissors, Shapes, Sparkles, Square, Type, Unlink2, Video, Volume2, X,
+  Lock, MoveHorizontal, Music, Replace, RotateCcw, Scissors, Shapes, Sparkles, Square, Type, Unlink2, Upload, Video, Volume2, X,
 } from 'lucide-react';
 
 import {
@@ -162,6 +162,8 @@ export const FilmInspector = React.memo(function FilmInspector({
   onPreviewClip,
   pageChangesOf,
   replaceEntries,
+  onApplyLut,
+  onReferForGrade,
   clipLookOf,
   onPreviewLook,
   stage,
@@ -227,6 +229,10 @@ export const FilmInspector = React.memo(function FilmInspector({
   pageChangesOf?: (clipLoc: string) => PageChanges | null;
   /** What can take a clip's place (the project's files, one from this computer): the clip's Replace button. */
   replaceEntries?: (block: TimelineBlock) => ContextMenuEntry[];
+  /** Imports and bakes a .cube LUT into a new asset, then puts that asset on this clip. */
+  onApplyLut?: (block: TimelineBlock) => Promise<true | false | string>;
+  /** Adds this clip to the connected chat composer before its AI-grading prompt is copied. */
+  onReferForGrade?: (block: TimelineBlock) => void;
   /** A clip's own CSS and `class` in film.html and how it looks now (see clip-look): its look sections read them. */
   clipLookOf?: (clipLoc: string) => { css: string; look: ClipLook | null; cls?: string } | null;
   /** Shows a clip in CSS not kept yet while a look value is dragged (null: its own again). */
@@ -333,6 +339,8 @@ export const FilmInspector = React.memo(function FilmInspector({
             onPreviewClip={onPreviewClip}
             {...(pageChangesOf ? { pageChangesOf } : {})}
             {...(replaceEntries ? { replaceEntries } : {})}
+            {...(onApplyLut ? { onApplyLut } : {})}
+            {...(onReferForGrade ? { onReferForGrade } : {})}
             {...(clipLookOf ? { clipLookOf } : {})}
             {...(onPreviewLook ? { onPreviewLook } : {})}
             {...(onStartCrop ? { onStartCrop } : {})}
@@ -401,6 +409,53 @@ function RedesignHint({ t, stage }: { t: T; stage: { w: number; h: number } }) {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function ColorGradeSection({ block, onApplyLut, onRefer, t }: {
+  block: TimelineBlock;
+  onApplyLut?: (block: TimelineBlock) => Promise<true | false | string>;
+  onRefer?: (block: TimelineBlock) => void;
+  t: T;
+}) {
+  const [applying, setApplying] = React.useState(false);
+  const [message, setMessage] = React.useState<string | null>(null);
+  const [copied, setCopied] = React.useState(false);
+  const ask = t('inspector.aiGradeAsk').replace('{clip}', block.title || block.src || 'the selected clip');
+  React.useEffect(() => { setMessage(null); setCopied(false); }, [block.id]);
+  const apply = async () => {
+    if (!onApplyLut || applying) return;
+    setApplying(true);
+    setMessage(null);
+    try {
+      const result = await onApplyLut(block);
+      if (result === true) setMessage(t('inspector.lutApplied'));
+      else if (typeof result === 'string') setMessage(result);
+    } finally {
+      setApplying(false);
+    }
+  };
+  const copyAsk = () => {
+    onRefer?.(block);
+    void navigator.clipboard?.writeText(ask).then(() => setCopied(true), () => setMessage(ask));
+  };
+  return (
+    <Section id="color-grade" title={t('inspector.colorGrade')}>
+      <p className="text-[10.5px] leading-[15px] text-[var(--text-muted)]">{t('inspector.colorGradeBody')}</p>
+      <div className="grid grid-cols-2 gap-1.5">
+        <button type="button" onClick={() => { void apply(); }} disabled={!onApplyLut || applying}
+          className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--fill-tsp)] text-[11px] font-medium text-[var(--text)] transition hover:bg-[var(--bg-hover)] disabled:opacity-45">
+          <Upload size={12} />
+          {t(applying ? 'inspector.lutApplying' : 'inspector.lutImport')}
+        </button>
+        <button type="button" onClick={copyAsk}
+          className="flex h-8 items-center justify-center gap-1.5 rounded-md bg-[var(--text)] text-[11px] font-medium text-[var(--bg)] transition hover:opacity-90">
+          {copied ? <Check size={12} /> : <Sparkles size={12} />}
+          {t(copied ? 'inspector.aiGradeCopied' : 'inspector.aiGrade')}
+        </button>
+      </div>
+      {message ? <p className="select-text text-[10.5px] leading-[15px] text-[var(--text-muted)]">{message}</p> : null}
+    </Section>
   );
 }
 
@@ -1483,12 +1538,14 @@ function clipsLook(
  * can only be looked at.
  */
 function ClipPanel({
-  block, onMain, geometry, stage, badges, onEdit, onPreviewClip, pageChangesOf, replaceEntries, clipLookOf, onPreviewLook, onStartCrop, onEditMask, maskAsk, onMaskAsked, fades,
+  block, onMain, geometry, stage, badges, onEdit, onPreviewClip, pageChangesOf, replaceEntries, onApplyLut, onReferForGrade, clipLookOf, onPreviewLook, onStartCrop, onEditMask, maskAsk, onMaskAsked, fades,
   propsHostOf,
 }: {
   fades?: ReadonlyMap<string, FadeMs>;
   propsHostOf?: (block: TimelineBlock) => PropsHost | null;
   replaceEntries?: (block: TimelineBlock) => ContextMenuEntry[];
+  onApplyLut?: (block: TimelineBlock) => Promise<true | false | string>;
+  onReferForGrade?: (block: TimelineBlock) => void;
   block: TimelineBlock;
   /** On the main track, where the magnet acts. */
   onMain: boolean;
@@ -1577,6 +1634,9 @@ function ClipPanel({
           ) : null}
           {/* the fades right under the place: used on most clips */}
           {docLoc && block.clipId ? <FadeSection t={t} blocks={[block]} fades={fades} commit={commit} /> : null}
+          {block.kind === 'video' && block.src ? (
+            <ColorGradeSection block={block} t={t} {...(onApplyLut ? { onApplyLut } : {})} {...(onReferForGrade ? { onRefer: onReferForGrade } : {})} />
+          ) : null}
           {look ? (
             <>
               <CropSection

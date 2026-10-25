@@ -11,7 +11,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants, createReadStream, createWriteStream, existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
-import { copyFile, cp, lstat, mkdir, readFile, readdir, readlink, rename, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
+import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -509,6 +509,52 @@ export async function freezeFrame(root, rel, ms) {
   /* seeking before the input lands on the frame itself (ffmpeg decodes from the keyframe before it) */
   await ffmpeg(['-ss', String(ms / 1000), '-i', abs, '-frames:v', '1', '-an', '-update', '1', own], { timeoutMs: 60_000, what: 'taking the frame' }).done;
   if (!existsSync(own)) throw new FileError(`${basename(rel)} has no frame at ${Math.round(ms) / 1000} s`, 422);
+  return posix(relative(root, out));
+}
+
+/**
+ * Bake a standard .cube LUT into a picture or video as a new asset. The source and LUT are only read; the result is
+ * kept under assets/graded, so changing a clip to use it is an ordinary, undoable film edit. A private working folder
+ * gives ffmpeg a short, punctuation-free LUT path (filter paths otherwise need several layers of escaping).
+ * @param {string} root @param {string} sourceRel @param {string} lutRel
+ */
+export async function applyLut(root, sourceRel, lutRel) {
+  const sourcePath = sourceRel.replace(/#.*$/, '');
+  const source = readable(root, sourcePath);
+  const lut = readable(root, lutRel);
+  const kind = clipKind(sourcePath);
+  if ((kind !== 'video' && kind !== 'still') || !existsSync(source)) throw new FileError(`${sourceRel} is not a picture or video here`, 404);
+  if (extname(lutRel).toLowerCase() !== '.cube' || !statSync(lut, { throwIfNoEntry: false })?.isFile()) throw new FileError(`${lutRel} is not a .cube LUT here`, 404);
+  if (statSync(lut).size > 32 * 1024 * 1024) throw new FileError(`${basename(lutRel)} is too large to be a LUT`, 422);
+  const lutText = await readFile(lut, 'utf8');
+  const oneDimensional = /^\s*LUT_1D_SIZE\b/im.test(lutText);
+  if (!oneDimensional && !/^\s*LUT_3D_SIZE\b/im.test(lutText)) throw new FileError(`${basename(lutRel)} does not contain a 1D or 3D LUT`, 422);
+
+  const dir = inside(root, `${ASSETS}/graded`);
+  await mkdir(dir, { recursive: true });
+  const sourceStem = basename(sourcePath, extname(sourcePath));
+  const lutStem = basename(lutRel, extname(lutRel));
+  const extension = kind === 'video' ? '.mp4' : '.png';
+  const name = freeIn(dir, `${cleanName(`${sourceStem} — ${lutStem}`) || 'graded'}${extension}`);
+  const out = inside(root, `${ASSETS}/graded/${name}`);
+  const cacheRoot = join(root, TOOL_DIR, 'cache');
+  await mkdir(cacheRoot, { recursive: true });
+  const work = await mkdtemp(join(cacheRoot, 'lut-'));
+  try {
+    await copyFile(lut, join(work, 'grade.cube'));
+    const filter = `${oneDimensional ? 'lut1d' : 'lut3d'}=file=grade.cube`;
+    const args = kind === 'video'
+      ? ['-i', source, '-map', '0:v:0', '-map', '0:a?', '-vf', filter, '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', out]
+      : ['-i', source, '-vf', filter, '-frames:v', '1', '-an', '-update', '1', out];
+    await ffmpeg(args, { cwd: work, timeoutMs: kind === 'video' ? 60 * 60_000 : 60_000, what: 'applying the LUT' }).done;
+  } catch (error) {
+    await rm(out, { force: true }).catch(() => {});
+    if (error instanceof FileError) throw error;
+    throw new FileError(`could not apply ${basename(lutRel)}: ${error instanceof Error ? error.message : String(error)}`, 422);
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => {});
+  }
+  if (!existsSync(out)) throw new FileError('the graded media was not made', 422);
   return posix(relative(root, out));
 }
 

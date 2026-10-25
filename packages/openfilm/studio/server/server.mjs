@@ -22,7 +22,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { EditError, editProjectFilm, pageClipLook, readProjectFilm } from './film.mjs';
-import { FileError, bringIn, collect, extractAudio, freezeFrame, importFile, inside, listFiles, makeFolder, moveCheck, moveFile, readable, relink, trashFile } from './files.mjs';
+import { FileError, applyLut, bringIn, collect, extractAudio, freezeFrame, importFile, inside, listFiles, makeFolder, moveCheck, moveFile, readable, relink, trashFile } from './files.mjs';
 import { ExportError, createExports, draftApps, exportCapabilities, exportsRoot, projectSizes } from './exports.mjs';
 import { MediaError, frame, loudness, poster, probe, waveform } from './derived.mjs';
 import { HistoryError, checkout, commitChanges, deleteBranch, discardChanges, historyFiles, log, mergeBranch, renameBranch, restoreCommit, status as historyStatus } from './history.mjs';
@@ -710,6 +710,11 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     if (rest === 'files/audio' && req.method === 'POST') {
       const { path: from } = /** @type {{ path?: string }} */ (await readJson(req));
       return json(res, 200, { path: await extractAudio(project.path, String(from ?? '')) });
+    }
+    /* a .cube color grade baked into a new picture/video under assets/graded; both inputs stay untouched */
+    if (rest === 'files/lut' && req.method === 'POST') {
+      const { source, lut } = /** @type {{ source?: string, lut?: string }} */ (await readJson(req));
+      return json(res, 200, { path: await applyLut(project.path, String(source ?? ''), String(lut ?? '')) });
     }
     /* files or folders of this computer copied in (cloned where the disk can) or linked (files.mjs bringIn): the paths
        given (the desktop app knows a dropped file's), else the person's pick in the system's dialog. { landed } */

@@ -2035,6 +2035,30 @@ export function ProjectView({ projectId, onProject, onLeave }: {
     if (!ok) throw new Error(String(answer.error ?? t('assets.uploadFailed')));
     return Array.isArray(answer.landed) ? answer.landed.map(String) : [];
   }, [projectApi, postJson, t]);
+  const onApplyLut = React.useCallback(async (block: TimelineBlock): Promise<true | false | string> => {
+    if (!block.loc || !block.src) return t('inspector.lutNoSource');
+    const picked = await onPick(t('inspector.lutPick'), false);
+    if (picked === 'no-dialog') return t('inspector.lutNoDialog');
+    const [chosen] = picked;
+    if (!chosen) return false;
+    if (!/\.cube$/i.test(chosen)) return t('inspector.lutWrongFile');
+    try {
+      const [lut] = await onBring([chosen], 'assets/luts', 'copy');
+      if (!lut) return t('inspector.lutFailed');
+      const { ok, answer } = await postJson(`${projectApi}/files/lut`, { source: block.src, lut });
+      if (!ok || typeof answer.path !== 'string') return String(answer.error ?? t('inspector.lutFailed'));
+      const failed = await editClips([{ loc: block.loc, prop: 'src', value: answer.path }]);
+      if (failed) return failed;
+      toast.show(t('inspector.lutApplied'));
+      return true;
+    } catch (error) {
+      return error instanceof Error ? error.message : t('inspector.lutFailed');
+    }
+  }, [editClips, onBring, onPick, postJson, projectApi, t, toast]);
+  const onReferForGrade = React.useCallback((block: TimelineBlock) => {
+    studioHost?.panel?.setOpen(true);
+    studioHost?.refer?.(refOfBlock(block));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const onRelink = React.useCallback(async (path: string, folder: boolean): Promise<MediaResult> => {
     const to = (await onPick(t('media.pickRelink'), folder));
     if (to === 'no-dialog' || !to.length) return 'ok';
@@ -3023,6 +3047,8 @@ export function ProjectView({ projectId, onProject, onLeave }: {
                       layerProps={layerProps}
                       pictures={pictureActions}
                       replaceEntries={tools.replaceEntries}
+                      onApplyLut={onApplyLut}
+                      onReferForGrade={onReferForGrade}
                       clipLookOf={clipLookOf}
                       onPreviewLook={previewLook}
                       onStartCrop={startStageCrop}

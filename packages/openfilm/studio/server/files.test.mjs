@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { FileError, bringIn, cleanName, collect, extractAudio, freezeFrame, importFile, inProject, inside, listFiles, makeFolder, moveCheck, moveFile, readable, relink, trashFile } from './files.mjs';
+import { FileError, applyLut, bringIn, cleanName, collect, extractAudio, freezeFrame, importFile, inProject, inside, listFiles, makeFolder, moveCheck, moveFile, readable, relink, trashFile } from './files.mjs';
 import { lstatSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { filmHtml, readFilmFile } from '../../src/film-doc.mjs';
@@ -232,6 +232,31 @@ test('a freeze frame is the video\'s frame at that moment, full size, a PNG besi
   assert.equal(await freezeFrame(root, 'assets/shot.mp4', 1240), 'assets/shot-frame-1_24s-2.png');
   await assert.rejects(freezeFrame(root, 'assets/none.mp4', 0), FileError);
   await assert.rejects(freezeFrame(root, '../x.mp4', 0), FileError);
+});
+
+test('a .cube LUT makes a new graded asset and leaves the source untouched', { skip: !hasFfmpeg && 'no ffmpeg' }, async () => {
+  mkdirSync(join(root, 'assets', 'luts'), { recursive: true });
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:size=64x36', '-frames:v', '1', join(root, 'assets', 'shot.png')]);
+  const before = readFileSync(join(root, 'assets', 'shot.png'));
+  writeFileSync(join(root, 'assets', 'luts', 'cool look.cube'), [
+    'TITLE "Identity"', 'LUT_3D_SIZE 2', 'DOMAIN_MIN 0 0 0', 'DOMAIN_MAX 1 1 1',
+    '0 0 0', '1 0 0', '0 1 0', '1 1 0', '0 0 1', '1 0 1', '0 1 1', '1 1 1', '',
+  ].join('\n'));
+  const graded = await applyLut(root, 'assets/shot.png', 'assets/luts/cool look.cube');
+  assert.equal(graded, 'assets/graded/shot — cool look.png');
+  assert.ok(existsSync(join(root, graded)));
+  assert.deepEqual(readFileSync(join(root, 'assets', 'shot.png')), before);
+  assert.equal(await applyLut(root, 'assets/shot.png', 'assets/luts/cool look.cube'), 'assets/graded/shot — cool look 2.png');
+  writeFileSync(join(root, 'assets', 'luts', 'curve.cube'), 'LUT_1D_SIZE 2\n0 0 0\n1 1 1\n');
+  assert.equal(await applyLut(root, 'assets/shot.png', 'assets/luts/curve.cube'), 'assets/graded/shot — curve.png');
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=64x36:rate=10:duration=0.2', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.2',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', join(root, 'assets', 'take.mp4')]);
+  const gradedVideo = await applyLut(root, 'assets/take.mp4', 'assets/luts/cool look.cube');
+  assert.equal(gradedVideo, 'assets/graded/take — cool look.mp4');
+  assert.deepEqual(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', join(root, gradedVideo)]).toString().trim().split('\n').sort(), ['audio', 'video']);
+  await assert.rejects(applyLut(root, 'assets/shot.png', 'assets/luts/nope.txt'), FileError);
+  writeFileSync(join(root, 'assets', 'luts', 'broken.cube'), 'not a lut');
+  await assert.rejects(applyLut(root, 'assets/shot.png', 'assets/luts/broken.cube'), /does not contain/);
 });
 
 test('media linked from elsewhere (a NAS): read through the link, listed, never written there', links, async () => {
